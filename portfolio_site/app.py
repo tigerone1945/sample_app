@@ -7,15 +7,29 @@ from datetime import datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlparse
 
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
 DB_PATH = BASE_DIR / "data" / "contacts.db"
+HTML_CONTENT_TYPE = "text/html; charset=utf-8"
+CSS_CONTENT_TYPE = "text/css; charset=utf-8"
+MAX_BODY_SIZE = 8_192
+CONTACT_FIELDS = {
+    "name": 120,
+    "email": 200,
+    "company": 160,
+    "message": 2000,
+}
+_DB_INITIALIZED = False
 
 
 def init_db() -> None:
+    global _DB_INITIALIZED
+    if _DB_INITIALIZED:
+        return
+
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -30,6 +44,7 @@ def init_db() -> None:
             )
             """
         )
+    _DB_INITIALIZED = True
 
 
 def save_contact(name: str, email: str, company: str, message: str) -> None:
@@ -206,6 +221,14 @@ def render_page(status: str | None = None, errors: list[str] | None = None) -> s
 </html>"""
 
 
+def parse_contact_fields(body: str) -> dict[str, str]:
+    parsed = parse_qs(body, keep_blank_values=True)
+    return {
+        field: parsed.get(field, [""])[0].strip()[:max_length]
+        for field, max_length in CONTACT_FIELDS.items()
+    }
+
+
 def validate_contact(fields: dict[str, str]) -> list[str]:
     errors: list[str] = []
     if not fields["name"]:
@@ -221,40 +244,40 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
     server_version = "PortfolioSite/0.1"
 
     def do_HEAD(self) -> None:
-        if self.path == "/" or self.path.startswith("/?"):
+        path = self.request_path
+        if path == "/":
             self.respond_headers(
                 len(render_page(status=self.query_status()).encode("utf-8")),
-                "text/html; charset=utf-8",
+                HTML_CONTENT_TYPE,
             )
             return
-        if self.path == "/static/styles.css":
-            self.respond_static_headers(STATIC_DIR / "styles.css", "text/css; charset=utf-8")
+        if path == "/static/styles.css":
+            self.respond_static_headers(STATIC_DIR / "styles.css", CSS_CONTENT_TYPE)
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_GET(self) -> None:
-        if self.path == "/" or self.path.startswith("/?"):
+        path = self.request_path
+        if path == "/":
             self.respond_html(render_page(status=self.query_status()))
             return
-        if self.path == "/static/styles.css":
-            self.respond_static(STATIC_DIR / "styles.css", "text/css; charset=utf-8")
+        if path == "/static/styles.css":
+            self.respond_static(STATIC_DIR / "styles.css", CSS_CONTENT_TYPE)
             return
         self.send_error(HTTPStatus.NOT_FOUND)
 
     def do_POST(self) -> None:
-        if self.path != "/contact":
+        if self.request_path != "/contact":
             self.send_error(HTTPStatus.NOT_FOUND)
             return
 
         content_length = int(self.headers.get("Content-Length", "0"))
+        if content_length > MAX_BODY_SIZE:
+            self.send_error(HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            return
+
         body = self.rfile.read(content_length).decode("utf-8")
-        parsed = parse_qs(body, keep_blank_values=True)
-        fields = {
-            "name": parsed.get("name", [""])[0].strip()[:120],
-            "email": parsed.get("email", [""])[0].strip()[:200],
-            "company": parsed.get("company", [""])[0].strip()[:160],
-            "message": parsed.get("message", [""])[0].strip()[:2000],
-        }
+        fields = parse_contact_fields(body)
         errors = validate_contact(fields)
         if errors:
             self.respond_html(render_page(errors=errors), status=HTTPStatus.BAD_REQUEST)
@@ -265,14 +288,19 @@ class PortfolioRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Location", "/?status=sent#contact")
         self.end_headers()
 
+    @property
+    def request_path(self) -> str:
+        return urlparse(self.path).path
+
     def query_status(self) -> str | None:
-        if "status=sent" in self.path:
+        query = parse_qs(urlparse(self.path).query)
+        if query.get("status") == ["sent"]:
             return "sent"
         return None
 
     def respond_html(self, content: str, status: HTTPStatus = HTTPStatus.OK) -> None:
         encoded = content.encode("utf-8")
-        self.respond_headers(len(encoded), "text/html; charset=utf-8", status)
+        self.respond_headers(len(encoded), HTML_CONTENT_TYPE, status)
         self.wfile.write(encoded)
 
     def respond_static(self, path: Path, content_type: str) -> None:
