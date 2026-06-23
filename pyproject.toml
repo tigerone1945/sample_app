@@ -1,0 +1,10 @@
+[project]
+name = "sample-app"
+version = "0.1.0"
+description = "Single-page engineer portfolio site with a SQLite-backed contact form."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[tool.uv]
+package = false
